@@ -11,7 +11,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfPower
+from homeassistant.const import PERCENTAGE, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -26,104 +26,63 @@ from .coordinator import EmaldoCoordinator
 class EmaldoSensorDescription(SensorEntityDescription):
     """Describe an Emaldo sensor."""
 
-    stat_type: str
-    value_index: int
-    scale: float = 0.001  # API returns watts, convert to kW
+    data_key: str
+    scale: float = 1.0
 
 
 SENSOR_DESCRIPTIONS: tuple[EmaldoSensorDescription, ...] = (
-    # Solar
     EmaldoSensorDescription(
         key="solar_power",
         translation_key="solar_power",
-        stat_type="mppt",
-        value_index=-1,  # sum of all values
+        data_key="solar_w",
+        scale=0.001,  # W to kW
         device_class=SensorDeviceClass.POWER,
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     EmaldoSensorDescription(
-        key="solar_string_1",
-        translation_key="solar_string_1",
-        stat_type="mppt",
-        value_index=0,
+        key="grid_power",
+        translation_key="grid_power",
+        data_key="grid_w",
+        scale=0.001,
         device_class=SensorDeviceClass.POWER,
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     EmaldoSensorDescription(
-        key="solar_string_2",
-        translation_key="solar_string_2",
-        stat_type="mppt",
-        value_index=1,
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    # Battery
-    EmaldoSensorDescription(
-        key="battery_charge_power",
-        translation_key="battery_charge_power",
-        stat_type="battery",
-        value_index=0,
+        key="battery_power",
+        translation_key="battery_power",
+        data_key="battery_w",
+        scale=0.001,
         device_class=SensorDeviceClass.POWER,
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     EmaldoSensorDescription(
-        key="battery_discharge_power",
-        translation_key="battery_discharge_power",
-        stat_type="battery",
-        value_index=1,
+        key="load_power",
+        translation_key="load_power",
+        data_key="load_w",
+        scale=0.001,
         device_class=SensorDeviceClass.POWER,
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     EmaldoSensorDescription(
-        key="battery_grid_charge_power",
-        translation_key="battery_grid_charge_power",
-        stat_type="battery",
-        value_index=2,
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    # Load
-    EmaldoSensorDescription(
-        key="load_grid_power",
-        translation_key="load_grid_power",
-        stat_type="load/usage",
-        value_index=0,
+        key="vehicle_power",
+        translation_key="vehicle_power",
+        data_key="vehicle_w",
+        scale=0.001,
         device_class=SensorDeviceClass.POWER,
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     EmaldoSensorDescription(
-        key="load_backup_power",
-        translation_key="load_backup_power",
-        stat_type="load/usage",
-        value_index=1,
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    # Grid
-    EmaldoSensorDescription(
-        key="grid_export_power",
-        translation_key="grid_export_power",
-        stat_type="grid",
-        value_index=2,
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    EmaldoSensorDescription(
-        key="grid_import_power",
-        translation_key="grid_import_power",
-        stat_type="grid",
-        value_index=4,
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        key="battery_soc",
+        translation_key="battery_soc",
+        data_key="soc",
+        scale=1.0,
+        device_class=SensorDeviceClass.BATTERY,
+        native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
     ),
 )
@@ -135,13 +94,10 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Emaldo sensors from a config entry."""
-    coordinators = entry.runtime_data
-
     entities: list[EmaldoSensor] = []
-    for coordinator in coordinators:
+    for coordinator in entry.runtime_data:
         for description in SENSOR_DESCRIPTIONS:
             entities.append(EmaldoSensor(coordinator, description))
-
     async_add_entities(entities)
 
 
@@ -151,11 +107,7 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
     entity_description: EmaldoSensorDescription
     _attr_has_entity_name = True
 
-    def __init__(
-        self,
-        coordinator: EmaldoCoordinator,
-        description: EmaldoSensorDescription,
-    ) -> None:
+    def __init__(self, coordinator: EmaldoCoordinator, description: EmaldoSensorDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.device_id}_{description.key}"
@@ -174,20 +126,7 @@ class EmaldoSensor(CoordinatorEntity[EmaldoCoordinator], SensorEntity):
         data = self.coordinator.data
         if not data:
             return None
-
-        stat = data.get(self.entity_description.stat_type)
-        if not stat:
+        raw = data.get(self.entity_description.data_key)
+        if raw is None:
             return None
-
-        values = stat.get("values", [])
-        idx = self.entity_description.value_index
-        scale = self.entity_description.scale
-
-        if idx == -1:
-            # Sum all values
-            return round(sum(values) * scale, 3)
-
-        if idx >= len(values):
-            return None
-
-        return round(values[idx] * scale, 3)
+        return round(raw * self.entity_description.scale, 3)

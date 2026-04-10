@@ -37,6 +37,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: EmaldoConfigEntry) -> bo
         devices = await client.get_devices(home_id)
 
         for device in devices:
+            # Establish E2E real-time connection
+            await client.e2e_connect(home_id, device)
+
             coordinator = EmaldoCoordinator(
                 hass,
                 client,
@@ -46,6 +49,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EmaldoConfigEntry) -> bo
                 device_name=device.get("name", device["model"]),
             )
             await coordinator.async_config_entry_first_refresh()
+            await coordinator.start_heartbeat()
             coordinators.append(coordinator)
 
     entry.runtime_data = coordinators
@@ -55,4 +59,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: EmaldoConfigEntry) -> bo
 
 async def async_unload_entry(hass: HomeAssistant, entry: EmaldoConfigEntry) -> bool:
     """Unload a config entry."""
+    for coordinator in entry.runtime_data:
+        await coordinator.async_shutdown()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

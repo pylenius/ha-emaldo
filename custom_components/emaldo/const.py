@@ -24,4 +24,4 @@ ALL_PROVIDERS = [
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
 
-DEFAULT_SCAN_INTERVAL = 60  # seconds
+DEFAULT_SCAN_INTERVAL = 10  # seconds (E2E real-time, was 60 for REST)

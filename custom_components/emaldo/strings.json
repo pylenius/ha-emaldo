@@ -23,15 +23,11 @@
   "entity": {
     "sensor": {
       "solar_power": { "name": "Solar power" },
-      "solar_string_1": { "name": "Solar string 1" },
-      "solar_string_2": { "name": "Solar string 2" },
-      "battery_charge_power": { "name": "Battery charge power" },
-      "battery_discharge_power": { "name": "Battery discharge power" },
-      "battery_grid_charge_power": { "name": "Battery grid charge power" },
-      "load_grid_power": { "name": "Grid load power" },
-      "load_backup_power": { "name": "Backup load power" },
-      "grid_export_power": { "name": "Grid export power" },
-      "grid_import_power": { "name": "Grid import power" }
+      "grid_power": { "name": "Grid power" },
+      "battery_power": { "name": "Battery power" },
+      "load_power": { "name": "Load power" },
+      "vehicle_power": { "name": "Vehicle power" },
+      "battery_soc": { "name": "Battery" }
     }
   }
 }
