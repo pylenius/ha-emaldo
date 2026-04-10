@@ -803,32 +803,60 @@ Payload: AES_encrypt(response_aes_key, chat_secret, binary_data)
 
 The app fires ~16 commands simultaneously after the heartbeat. Responses arrive asynchronously, matched by MSGID.
 
-#### Binary Method Codes (captured)
+#### Binary Method Codes (confirmed)
 
-| Code (hex) | Code (dec) | Likely Command |
-|-----------|-----------|----------------|
-| `0x0010` | 16 | keepalive / ping |
-| `0x0110` | 272 | get_mcu_info |
-| `0x0210` | 528 | get_inverter_info |
-| `0x02A0` | 672 | get_inverter_input_info |
-| `0x0410` | 1040 | get_battery_allinfo |
-| `0x0510` | 1296 | get_battery_info |
-| `0x07A0` | 1952 | get_cabinet_allinfo |
-| `0x10A0` | 4256 | get_global_loadstate |
-| `0x11A0` | 4512 | get_charge_strategies |
-| `0x16A0` | 5792 | get_region |
-| `0x17A0` | 6048 | get_mppt_state |
-| `0x18A0` | 6304 | get_ev_state |
-| `0x20A0` | 8352 | get_advance_info |
-| `0x25A0` | 9632 | get_communicate_signal |
-| `0x30A0` | 12448 | get_global_exceptions |
-| `0x33A0` | 13216 | get_mode |
-| `0x43A0` | 17312 | get_inverter_output_info |
-| `0x45A0` | 17824 | get_global_currentflow_info |
-| `0x52A0` | 21152 | get_emergency_charge |
-| `0x81A0` | 33184 | get_virtualpowerplant |
+Wire codes are **byte-swapped** from APK source codes. E.g., APK `0xA030` → wire `0x30A0`.
 
-*(Mapping based on command frequency patterns and APK code analysis. Some codes may be swapped.)*
+| Wire code | APK code | Command | Payload | Response |
+|-----------|----------|---------|---------|----------|
+| `0x30A0` | `0xA030` | **get_global_currentflow** | empty | 22B — all power values |
+| `0x17A0` | `0xA017` | get_cabinet_state | empty | 11B — SoC |
+| `0x18A0` | `0xA018` | get_battery_allinfo | empty | 57B |
+| `0x0410` | `0x1004` | get_inverter_info | index byte | 24B |
+| `0x0A10` | `0x100A` | get_inverter_input_info | empty | 9B |
+| `0x0110` | `0x1001` | get_inverter_output_info | empty | 3B |
+| `0x0810` | `0x1008` | get_mppt_state | empty | 7B+ |
+| `0x25A0` | `0xA025` | get_mcu_info | empty | 24B |
+| `0x21A0` | `0xA021` | get_global_loadstate | empty | 91B — device info |
+| `0x10A0` | `0xA010` | get_global_exceptions | empty | 22B |
+| `0x11A0` | `0xA011` | get_ev_state | empty | 57B |
+| `0x0710` | `0x1007` | get_mode | empty | 26B |
+| `0x04A0` | `0xA004` | get_charge_strategies | empty | 1B |
+| `0x32A0` | `0xA032` | get_advance_info | empty | 6B |
+| `0x07A0` | `0xA007` | get_communicate_signal | empty | 1B |
+| `0x02A0` | `0xA002` | get_emergency_charge | empty | 2B |
+| `0x06A0` | `0xA006` | get_virtual_power_plant | empty | 11B |
+
+#### Currentflow Response Format (0x30A0) — THE key command
+
+This single command returns all dashboard power values. Values are **signed 16-bit little-endian in hectowatts** (÷10 for kW).
+
+```
+Offset  Type    Field              Sign convention
+[0:2]   i16LE   batteryWat         + = discharge, - = charge
+[2:4]   i16LE   solarWat           + = producing
+[4:6]   i16LE   gridWat            + = import, - = export
+[6:8]   i16LE   additionLoadWat    - = consuming (show as positive)
+[8:10]  i16LE   otherLoadWat
+[10:12] i16LE   vehicleWat
+[12:14] u16LE   ip2Wat
+[14:16] u16LE   op2Wat
+[16]    byte    gridValid          1 = grid CT connected
+[17]    byte    bsensorValid       1 = battery sensor valid
+[18]    byte    solarEfficiency    efficiency type enum
+[19]    byte    thirdpartyPVOn     1 = third-party PV enabled
+[20:22] i16LE   dualPowerWat
+```
+
+**Verified example** (Grid exporting 3.1kW):
+```
+Hex: 00003000e1ffefff000000000000000001010300efff
+batteryWat=0    → 0.0 kW (idle)
+solarWat=48     → 4.8 kW ✓
+gridWat=-31     → -3.1 kW (export) ✓
+loadWat=-17     → 1.7 kW ✓
+vehicleWat=0    → 0.0 kW ✓
+```
 
 #### Connection Modes
 
@@ -870,10 +898,11 @@ The proxy mode is the most common for remote access and is what the capture show
 | emergency_charge | 0x52A0 | 2B | Emergency charge state |
 | virtualpowerplant | 0x81A0 | 11B | VPP state |
 
-**Remaining work:**
-- Decode binary response payloads into meaningful values (kW, %, temperatures)
-- APK classes `com.dinsafer.module_bmt.zd/z0.java` etc. contain the binary field parsers
-- Integrate decoded data into the live CLI dashboard
+**Fully decoded:**
+- `get_global_currentflow` (0x30A0) — Solar, Grid, Battery, Load, Vehicle power in hectowatts
+- Wire method codes are byte-swapped from APK source codes
+- Sign convention: positive = producing/discharging/importing, negative = consuming/exporting/charging
+- Python implementation: `emaldo_e2e.py` — real-time data in <2 seconds
 
 ### MQTT
 
