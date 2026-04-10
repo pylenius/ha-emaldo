@@ -522,23 +522,149 @@ Key: fbade9e36a3f36d3d676c1b808451dd7  (32 bytes)
 | PSE1 | Power Sense 1 | `fbec41de-...` |
 | PSE2 | Power Sense 2 | `12de0286-...` |
 
-## WebSocket
+## Real-time Communication Channels
 
-Real-time device communication is available via WebSocket:
+The Emaldo platform uses three different real-time channels depending on device type:
+
+### WebSocket (Security Panel only)
 
 ```
 wss://api.emaldo.com/device/ws/v2/CXRqKjx2MzSAkdyucR9NDyPiiQR2vQcQ
 ```
 
-Protocol details not yet documented.
+Used exclusively by the **security panel** system (alarm, sensors, sirens). Not used by BMT/battery devices.
+
+**Authentication:**
+
+On WebSocket open, the app sends an RC4-encrypted auth message:
+
+```
+RC4_HEX_UPPER( user_token + "&" + panel_device_token + "_" + timestamp_micros )
+```
+
+- `user_token` — from `/user/login/` response
+- `panel_device_token` — from the security panel device (not available on BMT-only systems)
+- `timestamp_micros` — `System.currentTimeMillis() * 1000`
+
+**Messages:**
+
+| Message | Meaning |
+|---------|---------|
+| `"1"` | Authentication successful |
+| `"-1"` | Authentication failed / forced logout |
+| `"-2"` | Device offline |
+| JSON object | Device event or command response |
+
+**JSON message structure:**
+```json
+{
+  "Action": "/device/result",
+  "Cmd": "command_name",
+  "Status": 1,
+  "MessageId": "...",
+  "Result": "<RC4+Snappy encrypted payload>"
+}
+```
+
+Known Actions:
+- `/device/result` — Command response
+- `/device/revice` — Device event (alarm, sensor trigger)
+- `/device/ping` — Device heartbeat (battery level, signal, IP)
+- `/device/sim` — SIM card status
+- `/device/offline` — Device went offline
+- `/device/cmdack` — Command acknowledgment
+
+**Note:** BMT-only installations (no security panel) cannot authenticate to the WebSocket — the auth requires a panel device token that doesn't exist.
+
+### E2E / KCP Protocol (BMT devices)
+
+BMT devices use a custom **E2E (end-to-end) protocol** over **KCP** (reliable UDP) for real-time command/control. This is how the app sends commands like `get_battery_allinfo`, `get_inverter_info`, etc. and receives live telemetry.
+
+**Step 1: E2E Login**
+
+```
+POST /home/e2e-login/{APP_ID}
+Host: api.emaldo.com
+```
+
+**Request:** `{"home_id": "<home_id>"}`
+
+**Response:**
+```json
+{
+  "chat_secret": "28TCeungHhmGkiChDc9X4HAvusXKVOKN",
+  "end_id": "bGPyCpKsyjHR4pHljXbEgJMIkr4Mpv85",
+  "end_secret": "H95DdfVInwD7rMxmnVHT4xYO42QqATQR",
+  "group_id": "WeujWKtzkNWCW77LO5FESUVZbHjI5m@0",
+  "host": "e2e2.emaldo.com:1050",
+  "util_host": "e2e2.emaldo.com:1051"
+}
+```
+
+**Step 2: KCP Connection**
+
+The app connects to `e2e2.emaldo.com:1050` using KCP (a reliable UDP transport implemented via Netty `NioDatagramChannel`). The connection is authenticated with the `end_id`, `end_secret`, and `group_id` from the E2E login response.
+
+**Protocol stack:**
+- **Transport:** UDP
+- **Reliability:** KCP (ARQ protocol, similar to TCP over UDP)
+- **Framework:** Netty `NioDatagramChannel`
+- **Encryption:** RC4 with APP_SECRET
+- **Compression:** Snappy
+- **Serialization:** JSON
+
+**Step 3: Commands**
+
+Once connected, the app sends JSON commands to the device's `group_id`:
+
+```json
+{"cmd": "get_battery_allinfo"}
+{"cmd": "get_inverter_info", "index": 0}
+{"cmd": "get_inverter_input_info"}
+{"cmd": "get_inverter_output_info"}
+{"cmd": "get_global_loadstate"}
+{"cmd": "get_global_exceptions"}
+{"cmd": "get_mcu_info"}
+{"cmd": "get_cabinet_allinfo"}
+{"cmd": "get_cabinet_state", "index": 1}
+{"cmd": "get_mppt_state"}
+{"cmd": "get_ev_state"}
+{"cmd": "get_emergency_charge"}
+{"cmd": "get_charge_strategies"}
+{"cmd": "get_region"}
+{"cmd": "get_virtualpowerplant"}
+{"cmd": "get_communicate_signal"}
+{"cmd": "get_advance_info"}
+{"cmd": "get_mode"}
+{"cmd": "reboot_inverter"}
+{"cmd": "set_emergency_charge", "startTime": 1671009940, "endTime": 1671182740, "on": true}
+{"cmd": "set_charge_strategies", "strategyType": 2, "smartReserve": 80, ...}
+{"cmd": "set_inverter_open", "on": true, "indexs": [0, 1, 2]}
+{"cmd": "set_battery_alloff"}
+{"cmd": "set_virtualpowerplant", "on": true}
+```
+
+**Implementation complexity:** The KCP protocol requires a custom UDP client with Netty-style framing, making it significantly more complex than REST API polling. The REST stats API provides 5-minute resolution data, which is sufficient for most monitoring use cases.
+
+### MQTT
+
+The Paho MQTT library (`org.eclipse.paho.client.mqttv3`) is bundled in the APK but is **not actively used** by the BMT module. References to `MqttTopic.TOPIC_LEVEL_SEPARATOR` are used only as a string constant (`"/"`). There is no MQTT broker connection for BMT devices.
+
+---
 
 ## Other Infrastructure
 
-| Service | URL |
-|---------|-----|
-| DNS-over-HTTPS | `doh.emaldo.com` |
-| Static content | `s.emaldo.com` |
-| Language files | `http://local.dinsafer.com/api/languages/` |
-| E2E relay | `e2e2.emaldo.com:1050` |
-| AWS Kinesis Video | `kinesisvideo.us-west-2.amazonaws.com` |
-| Cognito pool | `77917499-3a44-4966-9bf3-3798a134ac94` |
+| Service | URL | Protocol |
+|---------|-----|----------|
+| API server | `api.emaldo.com` | HTTPS (REST) |
+| Stats server | `dp.emaldo.com` | HTTPS (REST) |
+| E2E relay | `e2e2.emaldo.com:1050` | KCP (UDP) |
+| E2E util | `e2e2.emaldo.com:1051` | KCP (UDP) |
+| DNS-over-HTTPS | `doh.emaldo.com` | HTTPS |
+| Static content | `s.emaldo.com` | HTTPS |
+| Language files | `local.dinsafer.com` | HTTP |
+| Push notifications | `dou.emaldo.com` | HTTPS |
+| AWS Kinesis Video | `kinesisvideo.us-west-2.amazonaws.com` | HTTPS |
+| Cognito pool | `77917499-3a44-4966-9bf3-3798a134ac94` | AWS |
+
+All API domains (`api.emaldo.com`, `dp.emaldo.com`, `dou.emaldo.com`) resolve to the same IP (34.79.224.71) and use virtual hosting.
