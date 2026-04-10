@@ -239,6 +239,19 @@ class EmaldoAPIClient:
         self._e2e_connected = True
         _LOGGER.debug("E2E connected to %s:%d", self._e2e_host, self._e2e_port)
 
+    async def _send_heartbeat_safe(self) -> bool:
+        """Send heartbeat, return True if successful."""
+        try:
+            await self._send_heartbeat()
+            _LOGGER.debug("Heartbeat OK")
+            return True
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Heartbeat timeout — session may have expired")
+            return False
+        except Exception as err:
+            _LOGGER.warning("Heartbeat error: %s", err)
+            return False
+
     async def _send_alive(self, end_id: str, group_id: str, secret: str) -> None:
         ak = _rs(16)
         msgid = _mid()
@@ -308,25 +321,45 @@ class EmaldoAPIClient:
     async def get_current_data(self, home_id: str, device_id: str, model: str) -> dict[str, Any]:
         """Get real-time power data via E2E."""
         if not self._e2e_connected:
+            _LOGGER.warning("get_current_data called but E2E not connected")
             return {}
 
         data: dict[str, Any] = {}
 
         # Currentflow — all power values
-        resp = await self._send_e2e_command(METHOD_CURRENTFLOW)
-        if resp and resp.get("decrypted") and len(resp["decrypted"]) >= 12:
-            d = resp["decrypted"]
-            data["battery_w"] = struct.unpack_from("<h", d, 0)[0] * 100
-            data["solar_w"] = struct.unpack_from("<h", d, 2)[0] * 100
-            data["grid_w"] = struct.unpack_from("<h", d, 4)[0] * 100
-            data["load_w"] = -struct.unpack_from("<h", d, 6)[0] * 100
-            data["vehicle_w"] = struct.unpack_from("<h", d, 10)[0] * 100 if len(d) >= 12 else 0
+        try:
+            resp = await self._send_e2e_command(METHOD_CURRENTFLOW)
+            if resp and resp.get("decrypted") and len(resp["decrypted"]) >= 12:
+                d = resp["decrypted"]
+                data["battery_w"] = struct.unpack_from("<h", d, 0)[0] * 100
+                data["solar_w"] = struct.unpack_from("<h", d, 2)[0] * 100
+                data["grid_w"] = struct.unpack_from("<h", d, 4)[0] * 100
+                data["load_w"] = -struct.unpack_from("<h", d, 6)[0] * 100
+                data["vehicle_w"] = struct.unpack_from("<h", d, 10)[0] * 100 if len(d) >= 12 else 0
+            elif resp and resp.get("status") == 21204:
+                _LOGGER.warning("Session expired (21204), marking disconnected for reconnect")
+                self._e2e_connected = False
+                return {}
+            elif resp:
+                _LOGGER.warning("Currentflow: status=%s, decrypted=%s", resp.get("status"), bool(resp.get("decrypted")))
+            else:
+                _LOGGER.warning("Currentflow: no response (timeout)")
+        except Exception as err:
+            _LOGGER.error("Currentflow error: %s", err)
 
         # Battery info — SoC at byte[14:16] as u16LE
-        resp2 = await self._send_e2e_command(METHOD_BATTERY_INFO)
-        if resp2 and resp2.get("decrypted") and len(resp2["decrypted"]) >= 16:
-            data["soc"] = struct.unpack_from("<H", resp2["decrypted"], 14)[0]
+        try:
+            resp2 = await self._send_e2e_command(METHOD_BATTERY_INFO)
+            if resp2 and resp2.get("decrypted") and len(resp2["decrypted"]) >= 16:
+                data["soc"] = struct.unpack_from("<H", resp2["decrypted"], 14)[0]
+            elif resp2:
+                _LOGGER.debug("Battery info: status=%s", resp2.get("status"))
+            else:
+                _LOGGER.debug("Battery info: no response")
+        except Exception as err:
+            _LOGGER.debug("Battery info error: %s", err)
 
+        _LOGGER.debug("E2E data: %s", {k: v for k, v in data.items() if k != "decrypted"})
         return data
 
     async def close(self) -> None:

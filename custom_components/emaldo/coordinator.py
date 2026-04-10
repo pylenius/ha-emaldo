@@ -48,18 +48,32 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def _heartbeat_loop(self) -> None:
-        """Send heartbeat every 20 seconds to keep the relay session alive."""
+        """Send alive + heartbeat every 15 seconds to keep session alive."""
+        fail_count = 0
         try:
             while True:
-                await asyncio.sleep(20)
+                await asyncio.sleep(15)
+                if not self.client._e2e_connected:
+                    _LOGGER.debug("Heartbeat loop: disconnected, exiting")
+                    return
+                # Send both alive and heartbeat to keep relay session active
                 try:
+                    await self.client._send_alive(
+                        self.client._end_id, self.client._group_id, self.client._end_secret
+                    )
                     await self.client._send_heartbeat()
+                    fail_count = 0
+                    _LOGGER.debug("Keepalive OK (alive + heartbeat)")
                 except asyncio.TimeoutError:
-                    _LOGGER.warning("Heartbeat timeout, marking disconnected")
-                    self.client._e2e_connected = False
+                    fail_count += 1
+                    _LOGGER.warning("Keepalive timeout #%d", fail_count)
                 except Exception as err:
-                    _LOGGER.warning("Heartbeat error: %s, marking disconnected", err)
+                    fail_count += 1
+                    _LOGGER.warning("Keepalive error #%d: %s", fail_count, err)
+                if fail_count >= 2:
+                    _LOGGER.error("Keepalive failed %d times, marking disconnected", fail_count)
                     self.client._e2e_connected = False
+                    return
         except asyncio.CancelledError:
             pass
 
