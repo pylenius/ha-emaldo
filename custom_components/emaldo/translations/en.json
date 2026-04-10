@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Emaldo",
+        "description": "Enter your Emaldo app credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password",
+      "cannot_connect": "Cannot connect to Emaldo API",
+      "no_homes": "No homes found in your Emaldo account",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This account is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "solar_power": { "name": "Solar power" },
+      "solar_string_1": { "name": "Solar string 1" },
+      "solar_string_2": { "name": "Solar string 2" },
+      "battery_charge_power": { "name": "Battery charge power" },
+      "battery_discharge_power": { "name": "Battery discharge power" },
+      "battery_grid_charge_power": { "name": "Battery grid charge power" },
+      "load_grid_power": { "name": "Grid load power" },
+      "load_backup_power": { "name": "Backup load power" },
+      "grid_export_power": { "name": "Grid export power" },
+      "grid_import_power": { "name": "Grid import power" }
+    }
+  }
+}
