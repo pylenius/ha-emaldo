@@ -712,78 +712,96 @@ Example: CON on NORCHAN1 with options → `((13 << 4) & 0xF0) | ((4 << 1) & 0x0E
 | 247 (0xF7) | OPTION_SESSID | Session ID |
 | 248 (0xF8) | OPTION_QOSLEVEL | QoS level |
 
-#### Step 4: Two AES Encryption Layers
+#### Step 4: AES Encryption — Two Keys for Two Purposes
 
-The protocol uses two separate AES-256-CBC encryption layers:
+All payloads use AES-256-CBC with PKCS5 padding. The `Encryption.encryptAes(iv, key, data)` convention: **first param = IV, second = key**.
 
-**Layer 1: KCP transport encryption** (wraps every UDP datagram)
+The critical discovery (confirmed via implementation + packet capture): **different secrets are used for different message types:**
 
-From APK class `com.dinsafer.module_bmt.n0.a`:
+| Message type | IV (16 bytes) | Key (32 bytes) | Purpose |
+|-------------|---------------|----------------|---------|
+| **alive** | random `OPTION_AES` | `end_secret` | Relay server authentication |
+| **heartbeat** | random `OPTION_AES` | `chat_secret` | Device channel registration |
+| **commands** | random `OPTION_AES` | `chat_secret` | Device data queries |
+| **responses** | response `OPTION_AES` | `chat_secret` | Decrypt response payloads |
+
+- **`end_secret`** (from e2e-login) — authenticates with the relay server only. Used for alive messages.
+- **`chat_secret`** (from e2e-login) — communicates with the device via the relay. Used for heartbeat and all commands/responses.
+
+Each message generates a random 16-char `OPTION_AES` key used as the IV. Responses include their own `OPTION_AES` for decrypting the response payload.
+
+#### Step 5: Connection Handshake (confirmed working)
+
+The connection requires three steps before commands work:
+
 ```
-IV  = MD5(chat_secret).hexdigest()[:16].lower()   (16 bytes UTF-8)
-Key = chat_secret                                   (32 bytes UTF-8 → AES-256)
-Algorithm: AES/CBC/PKCS5PADDING
-Applied to: Every outbound KCP packet / decrypt every inbound
+1. → alive (home e2e credentials, end_secret encryption)
+   ← alive ACK status=0
+
+2. → alive (BMT e2e credentials, end_secret encryption)  
+   ← alive ACK status=0
+
+3. → heartbeat (BMT credentials, chat_secret encryption, with PROXY + RECEIVER)
+   ← heartbeat ACK status=0
+
+4. → commands (BMT credentials, chat_secret encryption)
+   ← command responses with binary data
 ```
 
-Note: This layer may not be active for the initial MSCT channel — it's applied per-KCP-session via `setConvert()`. The initial command channel may be unencrypted at the KCP layer.
-
-**Layer 2: MSCT payload encryption** (wraps the JSON payload within each MSCT message)
-
-From APK class `com.dinsafer.module_bmt.n0.b`:
-```
-IV  = session_aes_key   (16-char random string from OPTION_AES, 16 bytes UTF-8)
-Key = end_secret         (32-char string, 32 bytes UTF-8 → AES-256)
-Algorithm: AES/CBC/PKCS5PADDING
-Applied to: The payload portion of each MSCT message
-```
-
-The `Encryption.encryptAes(iv_string, key_string, data)` convention: **first parameter is IV, second is key**.
-
-#### Step 5: Sending Commands (confirmed via packet capture)
-
-Commands are sent as individual UDP datagrams. Each datagram is a complete MSCT message. The app fires all commands at once without waiting for responses — the server responds asynchronously.
-
-**Captured outbound packet structure** (228 bytes typical):
+**alive message** (authentication with relay):
 ```
 Header:  0xD9 (CON, NORCHAN1, hasOptions)
 Options:
-  [160] END_ID:       32 bytes (e.g., "bGZVYIhokoS8nDVv...")
-  [161] GROUP_ID:     32 bytes (e.g., "MJjln1Ec2tUk...")
+  [160] END_ID:       32 bytes (from e2e-login)
+  [161] GROUP_ID:     32 bytes (from e2e-login)
+  [163] AES:          16 bytes (random key)
+  [245] METHOD:       5 bytes  ("alive")
+  [246] MSGID:        27 bytes ("and_..." + timestamp)
+  [183] CONTENT_TYPE: 16 bytes ("application/json")
+Payload: 32 bytes (AES_encrypt(aes_key, end_secret, {"__time": <unix_ts>}))
+```
+
+**heartbeat message** (register device proxy channel):
+```
+Header:  0xD9
+Options:
+  [160] END_ID:       32 bytes (BMT e2e end_id)
+  [161] GROUP_ID:     32 bytes (device group_id)
+  [241] PROXY:        4 bytes  (int32 = 1)
+  [162] RECEIVER_ID:  32 bytes (device end_id from BMT list — permanent)
+  [163] AES:          16 bytes (random key)
+  [245] METHOD:       9 bytes  ("heartbeat")
+  [181] APP_ID:       32 bytes ("CXRqKjx2MzSAkdyucR9NDyPiiQR2vQcQ")
+  [246] MSGID:        27 bytes
+  [183] CONTENT_TYPE: 16 bytes ("application/json")
+Payload: 32 bytes (AES_encrypt(aes_key, chat_secret, {"__time": <unix_ts>}))
+```
+
+**command message** (query device):
+```
+Header:  0xD9
+Options:
+  [160] END_ID:       32 bytes (BMT e2e end_id)
+  [161] GROUP_ID:     32 bytes (device group_id)
   [241] PROXY:        4 bytes  (int32 = 1)
   [162] RECEIVER_ID:  32 bytes (device end_id from BMT list)
-  [163] AES:          16 bytes (random session key)
-  [181] APP_ID:       32 bytes ("CXRqKjx2MzSAkdyucR9NDyPiiQR2vQcQ")
+  [163] AES:          16 bytes (random key)
+  [181] APP_ID:       32 bytes
   [245] METHOD:       2 bytes  (binary command code, big-endian)
-  [246] MSGID:        27 bytes (e.g., "and_L25vPdVsDO1775823027026")
+  [246] MSGID:        27 bytes
   [183] CONTENT_TYPE: 16 bytes ("application/byte")
-Payload: 16 bytes (AES-256-CBC encrypted)
+Payload: 16 bytes (AES_encrypt(aes_key, chat_secret, b""))  ← empty, PKCS7-padded
 ```
 
-**Captured response structure:**
+**response message:**
 ```
-Header:  0xE3 (ACK, ASYNCCHAN1, hasOptions)
-Options:
-  [192] STATUS:       2 bytes  (0 = success)
-  [246] MSGID:        27 bytes (matches request)
-  [245] METHOD:       2 bytes  (echoes request method)
-  [183] CONTENT_TYPE: 16 bytes ("application/byte")
-  [161] GROUP_ID:     32 bytes
-  [241] PROXY:        1 byte   (1)
-  [163] AES:          16 bytes (response AES key)
-  [162] RECEIVER_ID:  32 bytes (echoes sender's end_id)
-  [160] END_ID:       32 bytes (device's end_id)
-Payload: 16-64 bytes (AES-256-CBC encrypted response data)
+Header:  0xE3 (ACK, ASYNCCHAN1)
+Options include: STATUS (2B, 0=success), MSGID (matches request), METHOD (echoes request),
+                 AES (response key for decryption), END_ID, RECEIVER_ID, GROUP_ID
+Payload: AES_encrypt(response_aes_key, chat_secret, binary_data)
 ```
 
-**Important observations from capture:**
-- **No handshake needed** — the app sends all commands immediately without alive/wake/estab
-- **Binary method codes** — OPTION_METHOD is a 2-byte integer, NOT a string
-- **Content type is `application/byte`** — payloads are binary, not JSON
-- **Responses come on channel 1** (ASYNCCHAN1) while requests go on channel 4 (NORCHAN1)
-- **MSGID format** — `"and_" + random + timestamp` (27 chars)
-- **All payloads are 16-byte aligned** (AES block size)
-- The app fires ~16 commands simultaneously, responses arrive asynchronously
+The app fires ~16 commands simultaneously after the heartbeat. Responses arrive asynchronously, matched by MSGID.
 
 #### Binary Method Codes (captured)
 
@@ -822,23 +840,40 @@ The app tries three connection modes in priority order:
 
 The proxy mode is the most common for remote access and is what the capture shows.
 
-#### Implementation Status
+#### Implementation Status (WORKING)
 
-**Working:**
-- MSCT binary message encoding/decoding — matches captured packet format
-- E2E login endpoints (both home and BMT-specific) — returns per-device credentials
-- Raw UDP to `e2e2.emaldo.com:1050` — server responds with ACK messages
+**Fully working (confirmed 2026-04-10):**
+- Raw MSCT over UDP to `e2e2.emaldo.com:1050`
+- Two-phase authentication: alive (end_secret) → heartbeat (chat_secret)
+- All 16 BMT command codes return data with status=0
+- Response payload decryption with chat_secret produces valid binary data
+- Python implementation: `emaldo_e2e.py`
 
-**Confirmed via packet capture (2026-04-10):**
-- Protocol is raw MSCT over UDP, NOT KCP-framed
-- Commands use 2-byte binary method codes, not string names
-- Content type is `application/byte`, not `application/json`
-- No alive/wake/estab handshake needed — commands are sent directly
-- Payloads are AES-256-CBC encrypted binary (16-byte blocks)
+**Verified command responses:**
 
-**In progress:**
-- Implementing correct binary method codes and payload encoding
-- Decrypting response payloads to extract battery/solar/grid data
+| Command | Method | Response | Data |
+|---------|--------|----------|------|
+| currentflow | 0x45A0 | 4B | Power flow summary |
+| inverter_info | 0x0210 | 24B | Inverter model, firmware, state |
+| inverter_input | 0x02A0 | 9B | Grid input power |
+| inverter_output | 0x43A0 | 3B | Grid output |
+| battery_allinfo | 0x0410 | status=1 | May need index parameter |
+| mppt_state | 0x17A0 | 11B | Solar string power |
+| cabinet_allinfo | 0x07A0 | 5B | Battery cabinet info |
+| global_loadstate | 0x10A0 | 91B | Network info, device name, IPs |
+| global_exceptions | 0x30A0 | 22B | Error/fault codes |
+| charge_strategies | 0x11A0 | 1B | Charge mode |
+| advance_info | 0x20A0 | 6B | Advanced settings |
+| comm_signal | 0x25A0 | 1B | Signal strength |
+| mode | 0x33A0 | 26B | Operating mode |
+| ev_state | 0x18A0 | 57B | EV charger state |
+| emergency_charge | 0x52A0 | 2B | Emergency charge state |
+| virtualpowerplant | 0x81A0 | 11B | VPP state |
+
+**Remaining work:**
+- Decode binary response payloads into meaningful values (kW, %, temperatures)
+- APK classes `com.dinsafer.module_bmt.zd/z0.java` etc. contain the binary field parsers
+- Integrate decoded data into the live CLI dashboard
 
 ### MQTT
 
