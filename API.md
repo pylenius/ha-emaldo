@@ -576,9 +576,9 @@ Known Actions:
 
 **Note:** BMT-only installations (no security panel) cannot authenticate to the WebSocket — the auth requires a panel device token that doesn't exist.
 
-### E2E / KCP Protocol (BMT devices)
+### E2E / MSCT Protocol (BMT devices)
 
-BMT devices use a custom **E2E (end-to-end) protocol** over **KCP** (reliable UDP) for real-time command/control. This is how the app sends commands like `get_battery_allinfo`, `get_inverter_info`, etc. and receives live telemetry.
+BMT devices use a custom **E2E (end-to-end) protocol** with **MSCT binary framing over raw UDP** for real-time command/control. **Corrected from earlier analysis:** the protocol does NOT use KCP — it's plain MSCT messages sent as UDP datagrams directly. This was confirmed via packet capture from the real Android app.
 
 #### Step 1: E2E Login (two endpoints)
 
@@ -644,37 +644,18 @@ The BMT endpoint returns per-device credentials. Each session generates fresh `e
 
 The app connects via UDP to `e2e2.emaldo.com:1050` (35.187.68.18) using the KCP protocol.
 
-**Protocol stack:**
+**Protocol stack (confirmed via packet capture):**
 ```
-Application: JSON commands / MSCT binary frames
+Application: Binary command codes + AES-encrypted payloads
     ↓
-Encryption: AES-256-CBC (two separate layers)
+Framing: MSCT binary messages (header + TLV options + payload)
     ↓
-Reliability: KCP (ARQ protocol, reliable UDP)
+Transport: Raw UDP datagrams (NO KCP framing)
     ↓
-Transport: UDP datagrams
+Network: UDP to e2e2.emaldo.com:1050 (35.187.68.18)
 ```
 
-**KCP configuration** (from APK `KcpClientImpl.java`):
-```
-noDelay: true (1)
-update_interval: 10ms
-resend_count: 2
-no_congestion_control: true (512)
-min_rto: 10ms
-window_size: 1024 send / 1024 receive
-MTU: 1350
-```
-
-**Conv ID calculation:**
-```
-conv = (sessionID << 16) | sessionType | 0x80
-```
-- `sessionID` = random int 1..65533 (`RandomStringUtils.getSessionID()`)
-- `sessionType`: CMD=1, HD_VIDEO=2, STD_VIDEO=3, JSON=4, SNAPSHOT=5, AUDIO=6, TALK=7, DOWNLOAD_RECORD=9, P2P_HANDSHAKE=11
-- For initial MSCT commands, use TYPE_CMD=1, so `conv = (sessionID << 16) | 0x81`
-
-**Verified:** The server at `e2e2.emaldo.com:1050` accepts KCP connections and returns ACK packets. Conv ID `0x80` (session=0, TYPE_CMD) is accepted.
+**Key correction:** Despite the APK containing KCP code, the actual BMT proxy communication uses **raw MSCT over UDP** — each MSCT message is a single UDP datagram. KCP is only used for P2P/LAN direct connections, not the proxy relay.
 
 #### Step 3: MSCT Message Layer
 
@@ -759,108 +740,105 @@ Applied to: The payload portion of each MSCT message
 
 The `Encryption.encryptAes(iv_string, key_string, data)` convention: **first parameter is IV, second is key**.
 
-#### Step 5: Connection Handshake
+#### Step 5: Sending Commands (confirmed via packet capture)
 
-The connection follows this sequence (from APK `s0/k.java` and `x/n.java`):
+Commands are sent as individual UDP datagrams. Each datagram is a complete MSCT message. The app fires all commands at once without waiting for responses — the server responds asynchronously.
 
+**Captured outbound packet structure** (228 bytes typical):
 ```
-1. → MSCT CON "alive" (authenticate with relay server)
-     Options: END_ID, GROUP_ID, METHOD="alive", AES=<random16>, MSGID
-     Payload: AES_encrypt({"__time": <unix_ts>})
-
-2. ← MSCT response "alive" (server confirms authentication)
-     First alive response triggers onConnect() callback
-
-3. → MSCT CON "wake" (wake up the BMT device)
-     Options: END_ID, GROUP_ID, METHOD="wake", AES, PROXY=1, MSGID
-     Payload: AES_encrypt({"__time": <unix_ts>})
-
-4. ← MSCT ACK "wake" (device is awake)
-
-5. → MSCT CON "estab" (establish KCP data channel)
-     Options: END_ID, GROUP_ID, RECEIVER_ID, AES, METHOD="estab", MSGID
-     Payload: AES_encrypt({"sess_id": <int>, "readable": true, 
-              "channel_white_list": [<channel_id>], "__time": <unix_ts>})
-
-6. ← MSCT ACK "estab" (KCP channel created)
-
-7. Create new KCP session (TYPE_JSON=4) with same sessionID
-   Set KCP-layer encryption using chat_secret
-
-8. → JSON commands directly over new KCP channel:
-   {"cmd": "get_battery_allinfo", "client": "Android", "msg_id": "..."}
-
-9. ← JSON responses over same KCP channel
+Header:  0xD9 (CON, NORCHAN1, hasOptions)
+Options:
+  [160] END_ID:       32 bytes (e.g., "bGZVYIhokoS8nDVv...")
+  [161] GROUP_ID:     32 bytes (e.g., "MJjln1Ec2tUk...")
+  [241] PROXY:        4 bytes  (int32 = 1)
+  [162] RECEIVER_ID:  32 bytes (device end_id from BMT list)
+  [163] AES:          16 bytes (random session key)
+  [181] APP_ID:       32 bytes ("CXRqKjx2MzSAkdyucR9NDyPiiQR2vQcQ")
+  [245] METHOD:       2 bytes  (binary command code, big-endian)
+  [246] MSGID:        27 bytes (e.g., "and_L25vPdVsDO1775823027026")
+  [183] CONTENT_TYPE: 16 bytes ("application/byte")
+Payload: 16 bytes (AES-256-CBC encrypted)
 ```
 
-**Channel types for KCP sessions:**
-
-| Type | Value | Purpose |
-|------|-------|---------|
-| CMD | 1 | MSCT command channel (alive, wake, estab) |
-| HD_VIDEO | 2 | HD video stream |
-| STD_VIDEO | 3 | Standard video stream |
-| JSON | 4 | JSON command/response channel |
-| SNAPSHOT | 5 | Camera snapshots |
-| AUDIO | 6 | Audio stream |
-| TALK | 7 | Two-way audio |
-| DOWNLOAD_RECORD | 9 | Recording download |
-| P2P_HANDSHAKE | 11 | P2P NAT traversal |
-
-#### Step 6: Connection Modes (Priority Order)
-
-The app tries three connection modes in order:
-
-1. **LAN** — Direct local network connection (if device IP is on same subnet)
-2. **P2P** — Direct peer-to-peer via NAT traversal (uses STUN-like handshake)
-3. **Proxy** — Relay through `e2e2.emaldo.com:1050` (always works, highest latency)
-
-For LAN and P2P, JSON commands go directly over KCP. For proxy, they're wrapped in MSCT frames with additional routing headers.
-
-#### BMT Commands (JSON format)
-
-```json
-{"cmd": "get_battery_allinfo"}
-{"cmd": "get_inverter_info", "index": 0}
-{"cmd": "get_inverter_input_info"}
-{"cmd": "get_inverter_output_info"}
-{"cmd": "get_global_loadstate"}
-{"cmd": "get_global_currentflow_info"}
-{"cmd": "get_global_exceptions"}
-{"cmd": "get_mcu_info"}
-{"cmd": "get_cabinet_allinfo"}
-{"cmd": "get_cabinet_state", "index": 1}
-{"cmd": "get_mppt_state"}
-{"cmd": "get_ev_state"}
-{"cmd": "get_emergency_charge"}
-{"cmd": "get_charge_strategies"}
-{"cmd": "get_region"}
-{"cmd": "get_virtualpowerplant"}
-{"cmd": "get_communicate_signal"}
-{"cmd": "get_advance_info"}
-{"cmd": "get_mode"}
-{"cmd": "keepalive", "client": "Android"}
-{"cmd": "reboot_inverter"}
-{"cmd": "set_emergency_charge", "startTime": 1671009940, "endTime": 1671182740, "on": true}
-{"cmd": "set_charge_strategies", "strategyType": 2, "smartReserve": 80, ...}
-{"cmd": "set_inverter_open", "on": true, "indexs": [0, 1, 2]}
-{"cmd": "set_battery_alloff"}
-{"cmd": "set_virtualpowerplant", "on": true}
+**Captured response structure:**
 ```
+Header:  0xE3 (ACK, ASYNCCHAN1, hasOptions)
+Options:
+  [192] STATUS:       2 bytes  (0 = success)
+  [246] MSGID:        27 bytes (matches request)
+  [245] METHOD:       2 bytes  (echoes request method)
+  [183] CONTENT_TYPE: 16 bytes ("application/byte")
+  [161] GROUP_ID:     32 bytes
+  [241] PROXY:        1 byte   (1)
+  [163] AES:          16 bytes (response AES key)
+  [162] RECEIVER_ID:  32 bytes (echoes sender's end_id)
+  [160] END_ID:       32 bytes (device's end_id)
+Payload: 16-64 bytes (AES-256-CBC encrypted response data)
+```
+
+**Important observations from capture:**
+- **No handshake needed** — the app sends all commands immediately without alive/wake/estab
+- **Binary method codes** — OPTION_METHOD is a 2-byte integer, NOT a string
+- **Content type is `application/byte`** — payloads are binary, not JSON
+- **Responses come on channel 1** (ASYNCCHAN1) while requests go on channel 4 (NORCHAN1)
+- **MSGID format** — `"and_" + random + timestamp` (27 chars)
+- **All payloads are 16-byte aligned** (AES block size)
+- The app fires ~16 commands simultaneously, responses arrive asynchronously
+
+#### Binary Method Codes (captured)
+
+| Code (hex) | Code (dec) | Likely Command |
+|-----------|-----------|----------------|
+| `0x0010` | 16 | keepalive / ping |
+| `0x0110` | 272 | get_mcu_info |
+| `0x0210` | 528 | get_inverter_info |
+| `0x02A0` | 672 | get_inverter_input_info |
+| `0x0410` | 1040 | get_battery_allinfo |
+| `0x0510` | 1296 | get_battery_info |
+| `0x07A0` | 1952 | get_cabinet_allinfo |
+| `0x10A0` | 4256 | get_global_loadstate |
+| `0x11A0` | 4512 | get_charge_strategies |
+| `0x16A0` | 5792 | get_region |
+| `0x17A0` | 6048 | get_mppt_state |
+| `0x18A0` | 6304 | get_ev_state |
+| `0x20A0` | 8352 | get_advance_info |
+| `0x25A0` | 9632 | get_communicate_signal |
+| `0x30A0` | 12448 | get_global_exceptions |
+| `0x33A0` | 13216 | get_mode |
+| `0x43A0` | 17312 | get_inverter_output_info |
+| `0x45A0` | 17824 | get_global_currentflow_info |
+| `0x52A0` | 21152 | get_emergency_charge |
+| `0x81A0` | 33184 | get_virtualpowerplant |
+
+*(Mapping based on command frequency patterns and APK code analysis. Some codes may be swapped.)*
+
+#### Connection Modes
+
+The app tries three connection modes in priority order:
+
+1. **LAN** — Direct local network (JSON over KCP)
+2. **P2P** — NAT traversal (JSON over KCP)
+3. **Proxy** — Relay via `e2e2.emaldo.com:1050` (MSCT binary over raw UDP)
+
+The proxy mode is the most common for remote access and is what the capture shows.
 
 #### Implementation Status
 
 **Working:**
-- KCP transport to `e2e2.emaldo.com:1050` — server accepts connections and ACKs packets
-- MSCT message encoding/decoding
-- E2E login endpoints (both home and BMT-specific)
+- MSCT binary message encoding/decoding — matches captured packet format
+- E2E login endpoints (both home and BMT-specific) — returns per-device credentials
+- Raw UDP to `e2e2.emaldo.com:1050` — server responds with ACK messages
+
+**Confirmed via packet capture (2026-04-10):**
+- Protocol is raw MSCT over UDP, NOT KCP-framed
+- Commands use 2-byte binary method codes, not string names
+- Content type is `application/byte`, not `application/json`
+- No alive/wake/estab handshake needed — commands are sent directly
+- Payloads are AES-256-CBC encrypted binary (16-byte blocks)
 
 **In progress:**
-- MSCT alive handshake — server ACKs at KCP level but no MSCT application response yet
-- Likely needs exact option ordering or additional fields to match the APK's format
-- A packet capture from the real Android app would help verify the exact byte format
-
-**Complexity note:** The full E2E/KCP protocol requires implementing KCP (reliable UDP), MSCT binary framing, two AES encryption layers, and a multi-stage handshake. For monitoring use cases, the REST stats API (5-minute resolution) is significantly simpler and already works.
+- Implementing correct binary method codes and payload encoding
+- Decrypting response payloads to extract battery/solar/grid data
 
 ### MQTT
 
