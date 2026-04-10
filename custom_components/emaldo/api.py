@@ -22,7 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # E2E method codes (wire format, byte-swapped from APK)
 METHOD_CURRENTFLOW = 0x30A0
-METHOD_SOC = 0x07A0
+METHOD_BATTERY_INFO = 0x0510  # get_battery_info — contains SoC at byte[14:16]
 
 # MSCT option types
 _OPT_END_ID = 160
@@ -322,10 +322,10 @@ class EmaldoAPIClient:
             data["load_w"] = -struct.unpack_from("<h", d, 6)[0] * 100
             data["vehicle_w"] = struct.unpack_from("<h", d, 10)[0] * 100 if len(d) >= 12 else 0
 
-        # SoC
-        resp2 = await self._send_e2e_command(METHOD_SOC)
-        if resp2 and resp2.get("decrypted") and len(resp2["decrypted"]) >= 3:
-            data["soc"] = resp2["decrypted"][2]
+        # Battery info — SoC at byte[14:16] as u16LE
+        resp2 = await self._send_e2e_command(METHOD_BATTERY_INFO)
+        if resp2 and resp2.get("decrypted") and len(resp2["decrypted"]) >= 16:
+            data["soc"] = struct.unpack_from("<H", resp2["decrypted"], 14)[0]
 
         return data
 

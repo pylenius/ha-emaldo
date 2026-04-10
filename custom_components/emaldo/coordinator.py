@@ -48,14 +48,17 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def _heartbeat_loop(self) -> None:
-        """Send heartbeat every 30 seconds to keep the relay session alive."""
+        """Send heartbeat every 20 seconds to keep the relay session alive."""
         try:
             while True:
-                await asyncio.sleep(30)
+                await asyncio.sleep(20)
                 try:
                     await self.client._send_heartbeat()
-                except Exception:
-                    _LOGGER.debug("Heartbeat failed, will reconnect on next update")
+                except asyncio.TimeoutError:
+                    _LOGGER.warning("Heartbeat timeout, marking disconnected")
+                    self.client._e2e_connected = False
+                except Exception as err:
+                    _LOGGER.warning("Heartbeat error: %s, marking disconnected", err)
                     self.client._e2e_connected = False
         except asyncio.CancelledError:
             pass
@@ -65,26 +68,44 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Reconnect E2E if disconnected
             if not self.client._e2e_connected:
                 _LOGGER.info("E2E reconnecting...")
+                # Cancel old heartbeat
+                if self._heartbeat_task:
+                    self._heartbeat_task.cancel()
+                    self._heartbeat_task = None
+                # Close old transport
+                await self.client.close()
+                # Fresh login + E2E connect
                 try:
                     await self.client.login()
+                    homes = await self.client.get_homes()
+                    if homes:
+                        await self.client.get_devices(homes[0]["home_id"])
                 except EmaldoAuthError:
-                    pass  # Token might still be valid
-                device = {"id": self.device_id, "model": self.device_model,
-                          "end_id": self.client._device_end_id or self.device_id}
-                # Find device end_id from device list
+                    pass
+                device = None
                 for dev in self.client.devices:
                     if dev["id"] == self.device_id:
                         device = dev
                         break
+                if not device:
+                    device = {"id": self.device_id, "model": self.device_model,
+                              "end_id": self.client._device_end_id}
                 await self.client.e2e_connect(self.home_id, device)
                 await self.start_heartbeat()
+                _LOGGER.info("E2E reconnected")
 
-            return await self.client.get_current_data(
+            data = await self.client.get_current_data(
                 self.home_id, self.device_id, self.device_model
             )
+            if not data:
+                raise UpdateFailed("Empty response from E2E")
+            return data
         except EmaldoAuthError as err:
+            self.client._e2e_connected = False
             raise UpdateFailed(f"Auth failed: {err}") from err
-        except (EmaldoConnectionError, Exception) as err:
+        except UpdateFailed:
+            raise
+        except Exception as err:
             self.client._e2e_connected = False
             raise UpdateFailed(f"E2E error: {err}") from err
 
