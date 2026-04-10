@@ -11,7 +11,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import EmaldoAPIClient
 from .const import CONF_EMAIL, CONF_PASSWORD
-from .coordinator import EmaldoCoordinator
+from .coordinator import EmaldoCoordinator, EmaldoEnergyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +51,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: EmaldoConfigEntry) -> bo
             await coordinator.async_config_entry_first_refresh()
             await coordinator.start_heartbeat()
             coordinators.append(coordinator)
+
+            # Energy coordinator (REST stats, every 5 min)
+            energy_coord = EmaldoEnergyCoordinator(
+                hass,
+                client,
+                home_id=home_id,
+                device_id=device["id"],
+                device_model=device["model"],
+                device_name=device.get("name", device["model"]),
+            )
+            await energy_coord.async_config_entry_first_refresh()
+            coordinators.append(energy_coord)
 
     entry.runtime_data = coordinators
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

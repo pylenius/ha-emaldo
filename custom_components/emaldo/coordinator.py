@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import EmaldoAPIClient, EmaldoAuthError, EmaldoConnectionError
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import DEFAULT_SCAN_INTERVAL, ENERGY_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -128,3 +128,39 @@ class EmaldoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
         await self.client.close()
+
+
+class EmaldoEnergyCoordinator(DataUpdateCoordinator[dict[str, float]]):
+    """Coordinator that polls REST stats every 5 minutes for daily energy."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        client: EmaldoAPIClient,
+        home_id: str,
+        device_id: str,
+        device_model: str,
+        device_name: str,
+    ) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_{device_id}_energy",
+            update_interval=timedelta(seconds=ENERGY_SCAN_INTERVAL),
+        )
+        self.client = client
+        self.home_id = home_id
+        self.device_id = device_id
+        self.device_model = device_model
+        self.device_name = device_name
+
+    async def _async_update_data(self) -> dict[str, float]:
+        try:
+            data = await self.client.get_daily_energy(
+                self.home_id, self.device_id, self.device_model
+            )
+            if not data:
+                raise UpdateFailed("Empty energy data")
+            return data
+        except Exception as err:
+            raise UpdateFailed(f"Energy stats error: {err}") from err

@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as crypto_padding
 import snappy
 
-from .const import ALL_PROVIDERS, APP_ID, APP_SECRET, API_DOMAIN
+from .const import ALL_PROVIDERS, APP_ID, APP_SECRET, API_DOMAIN, STATS_DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -361,6 +361,71 @@ class EmaldoAPIClient:
 
         _LOGGER.debug("E2E data: %s", {k: v for k, v in data.items() if k != "decrypted"})
         return data
+
+    async def get_daily_energy(self, home_id: str, device_id: str, model: str) -> dict[str, float]:
+        """Get today's cumulative energy from REST stats API (kWh)."""
+        energy: dict[str, float] = {}
+
+        for stat_type, keys in [
+            ("battery", ["battery_discharge_kwh", "battery_charge_kwh", "battery_grid_charge_kwh"]),
+            ("mppt", ["solar_string1_kwh", "solar_string2_kwh"]),
+            ("load/usage", ["load_grid_kwh", "load_backup_kwh"]),
+            ("grid", ["grid_import_kwh", "_grid_skip1", "grid_export_kwh"]),
+        ]:
+            try:
+                result = await self._rest_call_stats(
+                    f"/bmt/stats/{stat_type}/day/",
+                    {"home_id": home_id, "id": device_id, "model": model},
+                )
+                if isinstance(result, dict) and "data" in result and isinstance(result["data"], list):
+                    data = result["data"]
+                    interval = result.get("interval", 5)
+                    ncols = len(data[0]) - 1 if data else 0
+                    for i, key in enumerate(keys):
+                        if key.startswith("_") or i >= ncols:
+                            continue
+                        total_w = sum(e[i + 1] for e in data)
+                        energy[key] = round(total_w * interval / 60 / 1000, 3)  # kWh
+            except Exception as err:
+                _LOGGER.debug("Energy stats %s error: %s", stat_type, err)
+
+        # Compute totals
+        energy["solar_total_kwh"] = round(
+            energy.get("solar_string1_kwh", 0) + energy.get("solar_string2_kwh", 0), 3
+        )
+        energy["load_total_kwh"] = round(
+            energy.get("load_grid_kwh", 0) + energy.get("load_backup_kwh", 0), 3
+        )
+        energy["battery_charge_total_kwh"] = round(
+            energy.get("battery_charge_kwh", 0) + energy.get("battery_grid_charge_kwh", 0), 3
+        )
+
+        return energy
+
+    async def _rest_call_stats(self, endpoint: str, data: dict) -> dict[str, Any]:
+        """REST call to the stats domain."""
+        gmt = int(time.time() * 1000) * 1000000
+        data["gmtime"] = gmt
+        enc_json = _rc4(APP_SECRET, json.dumps(data).encode()).hex()
+        form = {"json": enc_json, "gm": "1"}
+        if self.token:
+            form["token"] = _rc4(APP_SECRET, f"{self.token}_{gmt}".encode()).hex()
+        url = f"https://{STATS_DOMAIN}{endpoint}{APP_ID}"
+        try:
+            async with self._session.post(url, data=form,
+                                           headers={"Host": STATS_DOMAIN},
+                                           timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                body = await resp.json(content_type=None)
+        except Exception as err:
+            raise EmaldoConnectionError(f"Stats REST error: {err}") from err
+
+        if body.get("Status") == 1 and body.get("Result"):
+            dec = _rc4(APP_SECRET, bytes.fromhex(body["Result"]))
+            try:
+                return json.loads(snappy.uncompress(dec))
+            except Exception:
+                return json.loads(dec)
+        return body
 
     async def close(self) -> None:
         if self._transport:

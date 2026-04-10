@@ -27,7 +27,13 @@
       "battery_power": { "name": "Battery power" },
       "load_power": { "name": "Load power" },
       "vehicle_power": { "name": "Vehicle power" },
-      "battery_soc": { "name": "Battery" }
+      "battery_soc": { "name": "Battery" },
+      "solar_energy_today": { "name": "Solar energy today" },
+      "battery_charge_energy_today": { "name": "Battery charge energy today" },
+      "battery_discharge_energy_today": { "name": "Battery discharge energy today" },
+      "load_energy_today": { "name": "Load energy today" },
+      "grid_import_energy_today": { "name": "Grid import energy today" },
+      "grid_export_energy_today": { "name": "Grid export energy today" }
     }
   }
 }
